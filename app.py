@@ -33,6 +33,8 @@ def get_default_api_key() -> str:
 # ==========================================
 with st.sidebar:
     st.header("⚙️ 실험 변수 설정")
+
+    # 서버 Secrets에 키가 있으면 화면에 노출하지 않음
     server_api_key = get_default_api_key()
     if server_api_key:
         api_key = server_api_key
@@ -68,9 +70,9 @@ with st.sidebar:
 
     max_steps = st.slider(
         "최대 추론 반복 횟수 (무한 루프 방지)",
-        min_value=1,
-        max_value=6,
-        value=4,
+        min_value=2,
+        max_value=10,
+        value=6,
     )
 
     st.divider()
@@ -111,11 +113,11 @@ def verify_url(url: str) -> dict:
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        )
+        ),
+        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
     }
     try:
         resp = requests.head(url, headers=headers, allow_redirects=True, timeout=5)
-        # 일부 서버는 HEAD 요청을 차단(403/405 등)하므로 GET으로 1회 재확인
         if resp.status_code >= 400:
             resp = requests.get(url, headers=headers, allow_redirects=True, timeout=5, stream=True)
             resp.close()
@@ -142,10 +144,11 @@ TOOL_MAP = {
 
 SYSTEM_PROMPT = """당신은 수행평가와 학술 자료조사를 돕는 '근거 검증형 에이전트 AI'입니다.
 반드시 아래 규칙을 지키세요:
-1. 사실 확인이 필요한 질문은 추측하지 말고 반드시 `search_web` 도구를 호출해 근거를 찾으세요.
-2. 답변에 URL 출처를 포함할 때는 반드시 `verify_url` 도구로 `alive: true`가 확인된 링크만 제시하세요.
-3. 검색 결과가 없거나 검증된 근거가 부족하면 절대 지어내지 말고, '확인할 수 있는 신뢰할 만한 근거를 찾지 못했습니다(불확실 인정).'라고 명확히 답하세요.
-4. 최종 답변은 [핵심 답변], [검증된 출처], [신뢰도 판정(검증됨 / 불확실 인정)] 형식으로 정리하세요."""
+1. 사실 확인이 필요한 질문은 추측하지 말고 `search_web` 도구를 1~2회 호출해 근거를 찾으세요.
+2. 검색 결과에서 가장 신뢰할 만한 링크 1~2개만 골라 `verify_url`로 확인하세요. 모든 링크를 다 검증할 필요는 없으며, `alive: true`인 링크가 1개라도 확인되면 추가 도구 호출 없이 즉시 최종 답변을 작성하세요.
+3. 답변에 URL 출처를 포함할 때는 반드시 `verify_url` 도구로 `alive: true`가 확인된 링크만 제시하세요.
+4. 검색 결과가 없거나 검증된 근거가 부족하면 절대 지어내지 말고, '확인할 수 있는 신뢰할 만한 근거를 찾지 못했습니다(불확실 인정).'라고 명확히 답하세요.
+5. 최종 답변은 [핵심 답변], [검증된 출처], [신뢰도 판정(검증됨 / 불확실 인정)] 형식으로 정리하세요."""
 
 
 # ==========================================
@@ -164,7 +167,7 @@ for msg in st.session_state.messages:
 # ==========================================
 # 6. 사용자 입력 및 수동 ReAct 에이전트 루프 실행
 # ==========================================
-prompt = st.chat_input("질문을 입력하세요 (예: 명량해전 거북선 12척 전술은? / 궁중 요리책 《수라간비결》 조리법은?)")
+prompt = st.chat_input("질문을 입력하세요 (예: 세종대왕 출생일은? / 궁중 요리책 《수라간비결》 조리법은?)")
 
 if prompt:
     if not api_key:
@@ -205,9 +208,10 @@ if prompt:
                 tools=[search_web, verify_url],
                 automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
             )
-            final_text = "최대 추론 반복 횟수에 도달하여 답변을 확정하지 못했습니다(불확실 인정)."
+            final_text = "확인할 수 있는 신뢰할 만한 근거를 찾지 못했습니다(불확실 인정)."
 
             with st.status("🤖 에이전트 추론 및 근거 검증 진행 중...", expanded=True) as status:
+                completed = False
                 for step in range(1, max_steps + 1):
                     try:
                         response = client.models.generate_content(
@@ -218,11 +222,13 @@ if prompt:
                     except Exception as e:
                         status.update(label="⚠️ API 호출 오류 발생", state="error")
                         final_text = f"⚠️ API 호출 오류가 발생했습니다:\n```text\n{e}\n```"
+                        completed = True
                         break
 
                     if not response.candidates or not response.candidates[0].content:
                         status.update(label="⚠️ 모델 응답 없음", state="error")
                         final_text = "모델이 유효한 응답을 반환하지 못했습니다(불확실 인정)."
+                        completed = True
                         break
 
                     candidate_content = response.candidates[0].content
@@ -235,6 +241,7 @@ if prompt:
                             label=f"✅ 검증 완료 (총 {step}단계, 도구 호출 {tool_call_count}회)",
                             state="complete",
                         )
+                        completed = True
                         break
 
                     # 요청된 도구(search_web, verify_url) 순차 실행 및 실시간 시각화
@@ -259,13 +266,36 @@ if prompt:
                             )
                         )
 
-                    # Gemini API 규격에 맞게 role="user"로 도구 실행 결과 전달
                     contents.append(types.Content(role="user", parts=tool_response_parts))
-                else:
-                    status.update(
-                        label=f"⚠️ 최대 반복 횟수({max_steps}회) 도달로 종료",
-                        state="error",
-                    )
+
+                # 최대 반복 횟수에 도달했을 때도 수집된 근거로 최종 답변을 정리하도록 1회 호출
+                if not completed:
+                    try:
+                        final_config = types.GenerateContentConfig(
+                            system_instruction=(
+                                SYSTEM_PROMPT
+                                + "\n더 이상 도구를 호출하지 말고, 지금까지 수집한 검색·검증 결과만을 바탕으로 즉시 최종 답변을 작성하세요."
+                            ),
+                            temperature=temperature,
+                            tools=[search_web, verify_url],
+                            tool_config=types.ToolConfig(
+                                function_calling_config=types.FunctionCallingConfig(mode="NONE")
+                            ),
+                        )
+                        final_resp = client.models.generate_content(
+                            model=model_name,
+                            contents=contents,
+                            config=final_config,
+                        )
+                        if final_resp.text:
+                            final_text = final_resp.text
+                        status.update(
+                            label=f"✅ 검증 완료 (최대 {max_steps}단계 후 종합 답변, 도구 호출 {tool_call_count}회)",
+                            state="complete",
+                        )
+                    except Exception as e:
+                        status.update(label="⚠️ 최종 답변 생성 오류", state="error")
+                        final_text = f"⚠️ 최종 답변 생성 중 오류가 발생했습니다:\n```text\n{e}\n```"
 
         elapsed = time.time() - start_time
         meta_text = (
