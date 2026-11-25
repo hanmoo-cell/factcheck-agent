@@ -33,12 +33,17 @@ def get_default_api_key() -> str:
 # ==========================================
 with st.sidebar:
     st.header("⚙️ 실험 변수 설정")
-    api_key = st.text_input(
-        "Gemini API Key",
-        value=get_default_api_key(),
-        type="password",
-        help="Streamlit Cloud 배포 시 Secrets에 GEMINI_API_KEY를 등록하면 자동 입력됩니다.",
-    )
+    server_api_key = get_default_api_key()
+    if server_api_key:
+        api_key = server_api_key
+        st.success("🔒 API 키가 서버에 안전하게 연결됨")
+    else:
+        api_key = st.text_input(
+            "Gemini API Key",
+            value="",
+            type="password",
+            help="로컬 실행 시 API 키를 직접 입력하세요.",
+        )
 
     mode = st.radio(
         "실행 모드 선택",
